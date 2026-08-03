@@ -1,34 +1,20 @@
-name: Run Pine Seeds Band Update
+name: Validate Pine Seeds data
 
-# Manually triggered from the GitHub Actions tab ("Run workflow" button).
-#
-# How to use:
-#   1. Commit your day's raw file into incoming/ first, e.g.:
-#        incoming/sec_list_03082026.csv
-#      (git add incoming/sec_list_03082026.csv && git commit -m "raw file" && git push)
-#   2. Go to the Actions tab on GitHub -> "Run Pine Seeds Band Update" -> "Run workflow"
-#   3. Enter the filename (e.g. sec_list_03082026.csv) in the input box and run.
-#   4. The workflow runs the converter and commits the updated data/BAND/*.csv
-#      files back to the repo automatically - no local git commands needed.
+# Runs automatically whenever you push updated data/BAND files.
+# This does NOT fetch NSE data or run the conversion for you -
+# you still run scripts/nse_band_to_pine_seeds.py manually each day
+# before committing. This workflow just checks the files you pushed
+# are well-formed so a bad file doesn't silently break Pine Seeds ingestion.
 
 on:
-  workflow_dispatch:
-    inputs:
-      csv_filename:
-        description: "Filename inside incoming/ to process (e.g. sec_list_03082026.csv)"
-        required: true
-        type: string
-      override_date:
-        description: "Optional: override date as YYYY-MM-DD (leave blank to auto-parse from filename)"
-        required: false
-        type: string
-        default: ""
+  push:
+    paths:
+      - "data/BAND/**"
+  workflow_dispatch: {}
 
 jobs:
-  update-band-data:
+  validate:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -38,41 +24,48 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Verify input file exists
+      - name: Validate CSV format
         run: |
-          FILE="incoming/${{ inputs.csv_filename }}"
-          if [ ! -f "$FILE" ]; then
-            echo "::error::File not found: $FILE. Commit it into incoming/ first, then re-run this workflow."
-            exit 1
-          fi
-          echo "Found $FILE"
+          python - <<'EOF'
+          import csv
+          import sys
+          from pathlib import Path
 
-      - name: Run converter
-        run: |
-          if [ -n "${{ inputs.override_date }}" ]; then
-            python scripts/nse_band_to_pine_seeds.py "incoming/${{ inputs.csv_filename }}" --date "${{ inputs.override_date }}"
-          else
-            python scripts/nse_band_to_pine_seeds.py "incoming/${{ inputs.csv_filename }}"
-          fi
+          errors = []
+          band_dir = Path("data/BAND")
+          files = list(band_dir.glob("*.csv"))
+          print(f"Checking {len(files)} symbol files...")
 
-      - name: Commit and push updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/BAND
-          if git diff --cached --quiet; then
-            echo "No changes to commit (data already up to date)."
-          else
-            git commit -m "Band update from ${{ inputs.csv_filename }}"
-            git push
-          fi
+          for f in files:
+              with open(f, newline="") as fh:
+                  reader = csv.reader(fh)
+                  rows = list(reader)
 
-      - name: Summary
-        run: |
-          echo "### Pine Seeds Band Update" >> $GITHUB_STEP_SUMMARY
-          echo "- Input file: \`${{ inputs.csv_filename }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Date used: \`${{ inputs.override_date || 'auto-parsed from filename' }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Files updated: \`data/BAND/*.csv\`" >> $GITHUB_STEP_SUMMARY
+              if not rows:
+                  errors.append(f"{f.name}: empty file")
+                  continue
+
+              prev_date = None
+              for i, row in enumerate(rows):
+                  if len(row) != 6:
+                      errors.append(f"{f.name} line {i+1}: expected 6 fields, got {len(row)}")
+                      continue
+                  date_str, o, h, l, c, v = row
+                  # date order check
+                  if prev_date and date_str <= prev_date:
+                      errors.append(f"{f.name} line {i+1}: date {date_str} not after previous {prev_date}")
+                  prev_date = date_str
+                  # numeric check
+                  try:
+                      float(o); float(h); float(l); float(c); float(v)
+                  except ValueError:
+                      errors.append(f"{f.name} line {i+1}: non-numeric OHLCV value")
+
+          if errors:
+              print(f"\n{len(errors)} problem(s) found:")
+              for e in errors[:50]:
+                  print(" -", e)
+              sys.exit(1)
+          else:
+              print("All files valid.")
+          EOF
