@@ -1,0 +1,71 @@
+name: Validate Pine Seeds data
+
+# Runs automatically whenever you push updated data/BAND files.
+# This does NOT fetch NSE data or run the conversion for you -
+# you still run scripts/nse_band_to_pine_seeds.py manually each day
+# before committing. This workflow just checks the files you pushed
+# are well-formed so a bad file doesn't silently break Pine Seeds ingestion.
+
+on:
+  push:
+    paths:
+      - "data/BAND/**"
+  workflow_dispatch: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate CSV format
+        run: |
+          python - <<'EOF'
+          import csv
+          import sys
+          from pathlib import Path
+
+          errors = []
+          band_dir = Path("data/BAND")
+          files = list(band_dir.glob("*.csv"))
+          print(f"Checking {len(files)} symbol files...")
+
+          for f in files:
+              with open(f, newline="") as fh:
+                  reader = csv.reader(fh)
+                  rows = list(reader)
+
+              if not rows:
+                  errors.append(f"{f.name}: empty file")
+                  continue
+
+              prev_date = None
+              for i, row in enumerate(rows):
+                  if len(row) != 6:
+                      errors.append(f"{f.name} line {i+1}: expected 6 fields, got {len(row)}")
+                      continue
+                  date_str, o, h, l, c, v = row
+                  # date order check
+                  if prev_date and date_str <= prev_date:
+                      errors.append(f"{f.name} line {i+1}: date {date_str} not after previous {prev_date}")
+                  prev_date = date_str
+                  # numeric check
+                  try:
+                      float(o); float(h); float(l); float(c); float(v)
+                  except ValueError:
+                      errors.append(f"{f.name} line {i+1}: non-numeric OHLCV value")
+
+          if errors:
+              print(f"\n{len(errors)} problem(s) found:")
+              for e in errors[:50]:
+                  print(" -", e)
+              sys.exit(1)
+          else:
+              print("All files valid.")
+          EOF
