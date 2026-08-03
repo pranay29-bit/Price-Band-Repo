@@ -1,0 +1,8 @@
+# Raw daily downloads - keep locally, don't need to version these
+incoming/*.csv
+!incoming/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
